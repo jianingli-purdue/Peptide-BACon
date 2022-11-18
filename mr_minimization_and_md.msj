@@ -1,0 +1,214 @@
+task {
+    task = "desmond:auto"
+}
+
+# run AA -> AA/CG conversion if necessary
+
+extern {
+    title = "All-Atom -> Mixed-Resolution conversion (if necessary)"
+    command = "
+
+import os
+import re
+import copy
+import subprocess
+
+from schrodinger.application.desmond import cmj, util
+from schrodinger.application.aacg.utils import is_aacg_cms_file
+
+def main(self, job):
+
+    jobname, dir = self._get_jobname_and_dir(job)
+
+    if not os.path.isdir(dir):
+        os.makedirs(dir)
+
+    util.chdir(dir)
+
+    infile = job.output.struct_file()
+
+    if not is_aacg_cms_file(infile):
+        outfile = re.sub(r'\.(mae|maegz|mae\.gz|cms)$', '_mr.cms',
+                         os.path.basename(infile))
+
+        temperature = '300.0'
+        command = [os.path.join(os.environ['SCHRODINGER'], 'run'),
+                   '-FROM', 'aacg', 'aa2mr.py', '-t', temperature, infile, outfile]
+
+        try:
+            subprocess.check_output(command)
+        except subprocess.CalledProcessError as e:
+            print('ERROR: conversion failed, aa2mr.py output follows:\n', e.output)
+            job.status.set(cmj.JobStatus.BACKEND_ERROR)
+            return
+    else:
+        print('Input file is a mixed-resolution CMS: proceeding to the next stage.')
+        outfile = infile
+
+    new_job = copy.deepcopy(job)
+    new_job.output.set_struct_file(os.path.abspath(outfile))
+    new_job.status.set(cmj.JobStatus.SUCCESS)
+
+    self._pas_job = [new_job,]
+"
+}
+
+minimize {
+    title = "Mixed-Resolution Minimization"
+
+    backend = {
+        force = {
+            ignore_com_dofs = false
+            constraint = {
+                maxit = 8
+                tol = 1e-08
+            }
+            nonbonded = {
+                n_zone = 1024
+                far = {
+                    spreading_style = scatter_gather
+                    type = pme
+                }
+                near = {
+                    r_tap = 9.0
+                    taper = "none"
+                    type = "polynomial"
+                    average_dispersion = 0.0
+                }
+            }
+        }
+    }
+
+    coulomb_method = [pme 1e-09]
+    cutoff_radius = 12.0
+    taper = false
+
+    glue = solute
+
+    energy_group = false
+    eneseq = {
+        first = 0.0
+        interval = 1.2
+        name = "$JOBNAME$[_replica$REPLICA$].ene"
+    }
+
+    max_steps = 2000
+    convergence = 1.0
+    num_vector = 3
+    steepest_descent_steps = 10
+}
+
+simulate {
+    title = "Mixed-Resolution Molecular Dynamics"
+
+    backend = {
+        force = {
+            ignore_com_dofs = false
+            constraint = {
+                maxit = 8
+                tol = 1e-08
+            }
+            nonbonded = {
+                n_zone = 1024
+                far = {
+                    spreading_style = scatter_gather
+                    type = pme
+                }
+                near = {
+                    r_tap = 9.0
+                    taper = "none"
+                    type = "polynomial"
+                    average_dispersion = 0.0
+                }
+            }
+        }
+        migration = {
+            first = 0.0
+            interval = 0.0456
+        }
+    }
+
+    coulomb_method = [pme 1e-09]
+    cutoff_radius = 12.0
+    taper = false
+
+    glue = none
+
+    energy_group = false
+    eneseq = {
+        first = 0.0
+        interval = 1.2
+        name = "$JOBNAME$[_replica$REPLICA$].ene"
+    }
+
+    meta = false
+    annealing = false
+
+    pressure = 1.01325
+    surface_tension = 4000.0
+
+    temperature = [
+        [300.0 0]
+    ]
+
+    ensemble = {
+        class = NVT
+        method = NH
+        thermostat = {
+            tau = 1.0
+        }
+    }
+
+    maeff_output = {
+        first = 0.0
+        interval = 120.0
+        name = "$JOBNAME$[_replica$REPLICA$]-out.cms"
+        trjidx = "$JOBNAME$[_replica$REPLICA$]-out.idx"
+    }
+
+    trajectory = {
+        center = []
+        first = 0.0
+        frames_per_file = 25
+        interval = 9.6 
+        name = "$JOBNAME$[_replica$REPLICA$]_trj"
+        periodicfix = true
+        write_velocity = false
+    }
+
+    randomize_velocity = {
+        first = 0.0
+        interval = inf
+        seed = 2007
+        temperature = "@*.temperature"
+    }
+
+    simbox = {
+        first = 0.0
+        interval = 1.2
+        name = "$JOBNAME$[_replica$REPLICA$]_simbox.dat"
+    }
+
+    time = 20000.0 
+    timestep = [0.0038 0.0038 0.0114]
+
+    dir = "."
+    compress = ""
+    jobname = "$MASTERJOBNAME"
+
+    checkpt = {
+        first = 0.0
+        interval = 240.0
+        name = "$JOBNAME.cpt"
+        write_last_step = true
+    }
+}
+
+trim {
+    save = [-2]
+    effect_if = [[is_debugging] {save = all}]
+}
+
+# Job launching command:
+# $SCHRODINGER/utilities/multisim -cpu 4 -maxjob 1 -m mr_md.msj \
+# -mode umbrella -o output.cms input.cms
